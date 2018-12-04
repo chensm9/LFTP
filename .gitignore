@@ -1,0 +1,4 @@
+*.bak
+*.pyc
+*/__pycache__
+*.pdf
