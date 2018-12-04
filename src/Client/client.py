@@ -45,14 +45,11 @@ class LFTPClient:
         self.TimeoutInterval = 0.01
 
     # 仅提供一次性服务
-    def start(self):
-        LFTPtype = input(">>> 输入传输类型（UPLOAD/DOWNLOAD）：")
-        if LFTPtype == "UPLOAD":
-            filepath = input(">>> 请输入文件路径: ")
+    def start(self, LFTPType, filename):
+        if LFTPType == "UPLOAD":
             self.ControlHandShake()
-            self.UpLoadFile(filepath)
-        elif LFTPtype == "DOWNLOAD":
-            filename = input(">>> 请输入要下载的文件名：")
+            self.UpLoadFile(filename)
+        elif LFTPType == "DOWNLOAD":
             self.ControlHandShake()
             self.DownloadFile(filename)
         else:
@@ -69,7 +66,6 @@ class LFTPClient:
             try:
                 message = self.udpClient.recv(2048)
             except Exception as e:
-                log_error(e)
                 con_time += 1
                 if con_time == 10:
                     log_error("连接失败，网络/服务端故障")
@@ -176,7 +172,7 @@ class LFTPClient:
 
     # 接收客户端ACK，滑动窗口
     def recvACK(self, filesize):
-        pbar = ProgressBar().start()
+        # pbar = ProgressBar().start()
 
         # 发送第一个数据报文，此时cwnd = 1
         self.cwnd = 1
@@ -194,6 +190,12 @@ class LFTPClient:
         # 设置超时定时器
         self.timer = threading.Timer(self.TimeoutInterval, self.TimeOutAndReSend)
         self.timer.start()
+
+        self.origin_time = time.time()
+        self.last_time = time.time()
+        self.last_recvsize = 0
+        self.compute_result = 0
+        self.total_result = 0
 
         recvSize = 0
         while(True):
@@ -227,7 +229,7 @@ class LFTPClient:
             # log_info(acknum, " ACKTIME: ",self.send_window.getACKTimeBySeqnum(acknum))
             if self.send_window.getACKTimeBySeqnum(acknum) == 4:
                 # 三次冗余进行重传，同时更新cwnd和ssthresh
-                log_warn("三次冗余", acknum)
+                # log_warn("三次冗余", acknum)
                 self.ssthresh = self.cwnd/2
                 self.cwnd = self.cwnd/2+3
                 r_content = self.send_window.getContentBySeqnum(acknum)
@@ -249,24 +251,36 @@ class LFTPClient:
                 self.timer = threading.Timer(self.TimeoutInterval, self.TimeOutAndReSend)
                 self.timer.start()
             elif self.send_window.getACKTimeBySeqnum(acknum) == -1:
-                pbar.update(100)
-                pbar.finish()
+                recvSize = filesize
+                self.UpLoadProgress(recvSize, filesize)
                 log_info("服务端接收完毕")
                 self.timer.cancel()
                 self.lock.release()
                 break
 
             self.lock.release()
-
-            # print(filesize, "", recvSize)
-            pbar.update(int(recvSize/filesize)*100)
+            self.UpLoadProgress(recvSize, filesize)
+            # pbar.update(int(recvSize/filesize)*100)
 
             if filesize == recvSize:
                 pbar.finish()
                 log_info("服务端接收完毕")
                 self.timer.cancel()
                 break
-            
+    
+    # 显示下载进度函数
+    def DownLoadProgress(self, recvSize, filesize):
+        time_change = time.time() - self.last_time
+        size_change = recvSize - self.last_recvsize
+        if (time_change >= 0.7):
+            self.last_time = time.time()
+            self.last_recvsize = recvSize
+            self.compute_result = size_change/time_change/1024
+            self.total_result = recvSize/(time.time()-self.origin_time)/1024
+        print('\r%d/%d  已经下载： %d%%  当前下载速度： %d kb/s  平均下载速度： %d kb/s' % \
+            (recvSize, filesize, int(recvSize/filesize*100), self.compute_result, self.total_result), end='')
+        if recvSize == filesize:
+            print("")
 
     # 定时器，超时重传，必定重传的是send_base
     def TimeOutAndReSend(self):
@@ -302,17 +316,23 @@ class LFTPClient:
         for i in range(self.N):
             self.window.append(None)
 
+        self.origin_time = time.time()
+        self.last_time = time.time()
+        self.last_recvsize = 0
+        self.compute_result = 0
+        self.total_result = 0
         recvsize = 0 # 已接收数据大小
+
         log_info("开始接收文件 %s"%(filename))
         with open(filename, 'wb') as f:
-            pbar = ProgressBar().start()
+            # pbar = ProgressBar().start()
             self.udpClient.settimeout(2)
             while True:
                 try:
                     message = self.udpClient.recv(2048)
                 except Exception as e:
                     if (recvsize == filesize):
-                        pbar.finish()
+                        # pbar.finish()
                         log_info("接收完毕，断开连接")
                     else:
                         log_error("连接已断开")
@@ -326,7 +346,8 @@ class LFTPClient:
                 while self.window[0] != None:
                     f.write(self.window[0])
                     recvsize += len(self.window[0])
-                    pbar.update(int(recvsize / filesize * 100))
+                    # pbar.update(int(recvsize / filesize * 100))
+                    self.DownLoadProgress(recvsize, filesize)
                     self.window.pop(0)
                     self.window.append(None)
                     self.recv_base += 1
@@ -340,9 +361,49 @@ class LFTPClient:
                 if (seqnum <= self.recv_base + self.N):
                     self.udpClient.sendto(response.pack(), (self.host, self.port))
 
+    # 显示上传进度函数
+    def UpLoadProgress(self, recvSize, filesize):
+        time_change = time.time() - self.last_time
+        size_change = recvSize - self.last_recvsize
+        if (time_change >= 0.7):
+            self.last_time = time.time()
+            self.last_recvsize = recvSize
+            self.compute_result = size_change/time_change/1024
+            self.total_result = recvSize/(time.time()-self.origin_time)/1024
+        print('\r%d/%d  已经上传： %d%%  当前上传速度： %d kb/s  平均上传速度： %d kb/s' % \
+            (recvSize, filesize, int(recvSize/filesize*100), self.compute_result, self.total_result), end='')
+        if recvSize == filesize:
+            print("")
+
+def getHelp():
+    tip = "指令格式：\n" +\
+          "  发送文件: LFTP lsend myserver mylargefile\n"+\
+          "  下载文件: LFTP lget myserver mylargefile\n"+\
+          "参数设置：\n"+\
+          "  myserver：url地址或者ip地址\n"+\
+          "  mylargefile： 文件路径"
+    print('\033[33m%s' % tip)
+
 
 if __name__ == '__main__':
-    client = LFTPClient('119.29.204.118', 12345, 1024)
-    # client = LFTPClient('127.0.0.1', 12345, 1024)
-    # client = LFTPClient('192.168.199.129', 12345, 1024)
-    client.start()
+    if len(sys.argv) != 5:
+        getHelp()
+    else:
+        if sys.argv[1] != "LFTP":
+            getHelp
+        else:
+            if sys.argv[2] == "lsend":
+                IP = sys.argv[3]
+                filename = sys.argv[4]
+                client = LFTPClient(IP, 12345, 1024)
+                client.start("UPLOAD", filename)
+            elif sys.argv[2] == "lget":
+                IP = sys.argv[3]
+                filename = sys.argv[4]
+                client = LFTPClient(IP, 12345, 1024)
+                client.start("DOWNLOAD", filename)
+            else:
+                getHelp()
+        
+        # client = LFTPClient('127.0.0.1', 12345, 1024)
+        # client = LFTPClient('192.168.199.129', 12345, 1024)

@@ -299,7 +299,7 @@ class LFTPserver:
 
             self.lock.release()
 
-            print(filesize, "", recvSize)
+            # print(recvSize + "/" + filesize,'\r')
             # pbar.update(int(recvSize/filesize)*100)
 
             if filesize == recvSize:
